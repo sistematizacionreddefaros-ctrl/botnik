@@ -1,0 +1,239 @@
+# Plan de Implementación: BOTNIK POS Foundation
+
+## Overview
+
+Implementación incremental de la Fase 1 del sistema BOTNIK: esquema SQL con 13 tablas y RLS multi-tenant, autenticación y roles con Supabase Auth, seed data idempotente, webhook handler de Meta Cloud API como Edge Function, y estructura base del proyecto React con routing protegido y layout responsivo. Cada tarea construye sobre las anteriores, priorizando la base de datos primero, luego backend (webhook), y finalmente frontend.
+
+## Tasks
+
+- [x] 1. Crear migraciones SQL del esquema base (tablas 1-7)
+  - [x] 1.1 Crear migración `00000000000001_create_restaurants.sql` con tabla `restaurants`
+    - UUID PK, columnas name/slug/phone/address/timezone/currency/tax_rate/is_active, created_at, updated_at
+    - UNIQUE constraint en `slug`
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+  - [x] 1.2 Crear migración `00000000000002_create_user_profiles.sql` con tabla `user_profiles`
+    - UUID PK con FK a `auth.users(id) ON DELETE CASCADE`, full_name, avatar_url, phone, created_at
+    - Sin `restaurant_id` (excepción documentada)
+    - _Requirements: 1.2, 1.3, 1.4_
+  - [x] 1.3 Crear migración `00000000000003_create_user_restaurants.sql` con tabla `user_restaurants`
+    - UUID PK, user_id FK a auth.users, restaurant_id FK a restaurants, role con CHECK constraint para 5 roles, is_active, created_at
+    - UNIQUE(user_id, restaurant_id)
+    - _Requirements: 1.2, 1.3, 1.4, 1.6, 1.7, 1.9, 4.1_
+  - [x] 1.4 Crear migración `00000000000004_create_menu_items.sql` con tabla `menu_items`
+    - UUID PK, restaurant_id FK, name, description, price, category, image_url, is_available, sort_order, created_at, updated_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6_
+  - [x] 1.5 Crear migración `00000000000005_create_ingredients.sql` con tabla `ingredients`
+    - UUID PK, restaurant_id FK, name, unit con CHECK('g','ml','unit'), current_stock, min_stock, cost_per_unit, created_at, updated_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
+  - [x] 1.6 Crear migración `00000000000006_create_product_recipes.sql` con tabla `product_recipes`
+    - UUID PK, menu_item_id FK, ingredient_id FK, quantity_needed, created_at
+    - UNIQUE(menu_item_id, ingredient_id)
+    - _Requirements: 1.2, 1.3, 1.4, 1.6, 1.10_
+  - [x] 1.7 Crear migración `00000000000007_create_tables.sql` con tabla `tables`
+    - UUID PK, restaurant_id FK, label, capacity, status con CHECK('free','occupied','reserved'), zone, sort_order, created_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.6, 1.7_
+
+- [x] 2. Crear migraciones SQL del esquema base (tablas 8-13 + índices)
+  - [x] 2.1 Crear migración `00000000000008_create_shifts.sql` con tabla `shifts`
+    - UUID PK, restaurant_id FK, user_id FK, status CHECK('active','closed'), opening_cash, closing_cash, expected_cash, total_sales, total_orders, difference, notes, opened_at, closed_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.6, 1.7_
+  - [x] 2.2 Crear migración `00000000000009_create_orders.sql` con tabla `orders`
+    - UUID PK, restaurant_id FK, order_number, order_type CHECK, status CHECK, table_id FK, shift_id FK, customer_name, customer_phone, delivery_address, subtotal, tax, total, payment_status CHECK, notes, cancel_reason, wa_message_id, created_by FK, created_at, updated_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
+  - [x] 2.3 Crear migración `00000000000010_create_order_items.sql` con tabla `order_items`
+    - UUID PK, order_id FK, menu_item_id FK, quantity, unit_price, subtotal, modifiers JSONB, notes, created_at
+    - _Requirements: 1.2, 1.3, 1.4_
+  - [x] 2.4 Crear migración `00000000000011_create_inventory_movements.sql` con tabla `inventory_movements`
+    - UUID PK, restaurant_id FK, ingredient_id FK, type CHECK('purchase','consumption','adjustment','waste'), quantity, reference_id, notes, created_by FK, created_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.6, 1.7_
+  - [x] 2.5 Crear migración `00000000000012_create_webhook_logs.sql` con tabla `webhook_logs`
+    - UUID PK, restaurant_id (nullable), message_id UNIQUE, direction CHECK, payload JSONB, status CHECK, error_message, processing_ms, created_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.7, 1.8_
+  - [x] 2.6 Crear migración `00000000000013_create_audit_logs.sql` con tabla `audit_logs`
+    - UUID PK, restaurant_id FK, user_id FK, action, entity_type, entity_id, old_data JSONB, new_data JSONB, ip_address, created_at
+    - _Requirements: 1.2, 1.3, 1.4, 1.6_
+  - [x] 2.7 Crear migración `00000000000014_create_indexes.sql` con los 11 índices
+    - idx_orders_restaurant, idx_orders_status, idx_order_items_order, idx_menu_items_restaurant, idx_ingredients_restaurant, idx_inventory_movements_ingredient, idx_shifts_restaurant_active (parcial), idx_webhook_logs_message, idx_audit_logs_entity, idx_user_restaurants_user, idx_tables_restaurant
+    - _Requirements: 1.11_
+  - [ ]\* 2.8 Escribir property test para convenciones de esquema (P1)
+    - **Property 1: Convenciones de esquema en todas las tablas**
+    - Para cualquier tabla, verificar UUID PK con gen_random_uuid(), created_at TIMESTAMPTZ, y restaurant_id FK en tablas de negocio
+    - **Validates: Requirements 1.3, 1.4, 1.6**
+  - [ ]\* 2.9 Escribir property test para CHECK constraints (P2)
+    - **Property 2: CHECK constraints rechazan valores inválidos**
+    - Para cualquier string fuera de los valores permitidos, un INSERT debe ser rechazado. Incluye los 5 roles exactos en user_restaurants.role
+    - **Validates: Requirements 1.7, 4.1**
+
+- [x] 3. Checkpoint — Verificar migraciones de esquema
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 4. Habilitar RLS y crear políticas de seguridad
+  - [x] 4.1 Crear migración `00000000000015_enable_rls.sql`
+    - Habilitar RLS en las 13 tablas con `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
+    - _Requirements: 2.1_
+  - [x] 4.2 Crear migración `00000000000016_create_rls_policies.sql` con todas las políticas
+    - Política de aislamiento por tenant en tablas de negocio (filtro por user_restaurants.is_active)
+    - Escritura en menu_items: solo owner/admin
+    - Escritura en ingredients: owner/admin/cashier
+    - Escritura en orders y order_items: owner/admin/cashier
+    - Escritura en tables: owner/admin/cashier/waiter
+    - Lectura de user_profiles: propio usuario u owner del mismo restaurante
+    - Escritura en user_restaurants: solo owner
+    - INSERT en webhook_logs: sin autenticación (service_role)
+    - INSERT en audit_logs: cualquier usuario autenticado del tenant
+    - Retorno de cero filas cuando usuario no tiene registros activos
+    - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10_
+  - [ ]\* 4.3 Escribir property test para aislamiento multi-tenant (P3)
+    - **Property 3: Aislamiento multi-tenant por RLS**
+    - Para cualquier usuario, las filas retornadas deben tener restaurant_id que coincida exclusivamente con sus restaurantes activos en user_restaurants
+    - **Validates: Requirements 2.1, 2.2, 2.10, 4.5**
+  - [ ]\* 4.4 Escribir property test para escritura RLS según roles (P4)
+    - **Property 4: Escritura RLS según matriz de roles**
+    - Para cualquier combinación (tabla, rol, operación), INSERT/UPDATE permitido solo si el rol está autorizado
+    - **Validates: Requirements 2.3, 2.4, 2.5, 2.6, 4.6**
+  - [ ]\* 4.5 Escribir property test para lectura de user_profiles (P5)
+    - **Property 5: Lectura de user_profiles restringida**
+    - SELECT retorna solo propio perfil, excepto owner que puede ver perfiles de su restaurante
+    - **Validates: Requirements 2.7**
+
+- [x] 5. Checkpoint — Verificar RLS y políticas de seguridad
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 6. Implementar autenticación con Supabase y store de estado
+  - [x] 6.1 Crear cliente Supabase en `src/lib/supabase.ts`
+    - Inicializar con `createClient<Database>` usando `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`
+    - _Requirements: 8.9_
+  - [x] 6.2 Crear tipos TypeScript en `src/lib/types.ts`
+    - Definir tipos: UserRole, TableStatus, ShiftStatus, OrderType, OrderStatus, PaymentStatus, InventoryMovementType, IngredientUnit, WebhookDirection, WebhookStatus
+    - Definir interfaces: Restaurant, UserProfile, UserRestaurant, MenuItem, Ingredient, ProductRecipe, Table, Shift, Order, OrderItem, InventoryMovement, WebhookLog, AuditLog
+    - _Requirements: 8.1_
+  - [x] 6.3 Crear auth store con Zustand en `src/stores/authStore.ts`
+    - Implementar AuthState con: session, user, profile, activeRestaurant, role, userRestaurants, isLoading
+    - Implementar actions: initialize (suscripción a onAuthStateChange), signIn, signUp (con creación de user_profile), signOut, setActiveRestaurant
+    - Al hacer signIn: obtener user_restaurants del usuario y setear restaurante/rol activo
+    - Al hacer signOut: limpiar todo el estado a null/vacío
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 8.10_
+  - [ ]\* 6.4 Escribir property test para AuthStore (P16)
+    - **Property 16: AuthStore mantiene estado consistente**
+    - Tras signIn: session y user no nulos. Tras setActiveRestaurant: activeRestaurant y role no nulos. Tras signOut: todo null/vacío
+    - **Validates: Requirements 8.10**
+  - [ ]\* 6.5 Escribir property test para creación automática de perfil (P6)
+    - **Property 6: Creación automática de perfil al registrarse**
+    - Para cualquier registro exitoso, debe existir user_profiles con mismo id y full_name
+    - **Validates: Requirements 3.4**
+  - [ ]\* 6.6 Escribir property test para mensajes de error genéricos (P7)
+    - **Property 7: Mensajes de error no revelan existencia de email**
+    - Para cualquier intento de login inválido, el mensaje de error debe ser idéntico independientemente de si el email existe
+    - **Validates: Requirements 3.7**
+
+- [x] 7. Implementar seed data para desarrollo
+  - [x] 7.1 Crear `supabase/seed.sql` con datos de demostración idempotentes
+    - Restaurante demo: nombre, slug único, teléfono, dirección, timezone America/Mexico_City, moneda MXN, tax_rate 0.16
+    - 5 usuarios (uno por rol): owner, admin, cashier, waiter, kitchen — vinculados al restaurante demo via user_restaurants
+    - Al menos 10 menu_items en 3+ categorías (entrada, plato_fuerte, bebida) con precios y disponibilidad
+    - Al menos 10 ingredientes con unidades variadas (g, ml, unit), stock actual, stock mínimo, costo unitario
+    - Al menos 5 recetas en product_recipes vinculando items con ingredientes
+    - Al menos 5 mesas con labels, capacidades, zonas y estados variados
+    - Usar `INSERT ... ON CONFLICT DO NOTHING` para idempotencia
+    - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
+  - [ ]\* 7.2 Escribir property test para idempotencia del seed (P8)
+    - **Property 8: Idempotencia del seed script**
+    - Para N ejecuciones consecutivas (N ≥ 1), el conteo de registros debe ser idéntico al de la primera ejecución
+    - **Validates: Requirements 5.7**
+
+- [x] 8. Checkpoint — Verificar esquema, RLS, auth y seed data
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 9. Implementar webhook handler de Meta Cloud API
+  - [x] 9.1 Crear Edge Function en `supabase/functions/webhook/index.ts`
+    - Handler GET para verificación: validar hub.verify_token contra env WHATSAPP_VERIFY_TOKEN, responder 200 + hub.challenge si válido, 403 si inválido, 400 si faltan parámetros
+    - Handler POST para recepción: extraer message_id del payload, verificar idempotencia contra webhook_logs, insertar log con direction='inbound'/status='received'/payload crudo/processing_ms, responder 200 siempre
+    - Manejar payloads inválidos: loguear con status='ignored', responder 200
+    - Manejar errores: loguear con status='failed' y error_message, responder 200
+    - Usar SUPABASE_SERVICE_ROLE_KEY para bypass de RLS al insertar en webhook_logs
+    - _Requirements: 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7_
+  - [ ]\* 9.2 Escribir property test para verificación de token (P9)
+    - **Property 9: Verificación de webhook — validación de token**
+    - Para cualquier par (token_enviado, token_configurado), responder 200+challenge si y solo si coinciden, 403 en otro caso
+    - **Validates: Requirements 6.1, 6.2, 6.3**
+  - [ ]\* 9.3 Escribir property test para parámetros requeridos (P10)
+    - **Property 10: Verificación de webhook — parámetros requeridos**
+    - Para cualquier subconjunto estricto de los 3 parámetros requeridos, responder 400
+    - **Validates: Requirements 6.4**
+  - [ ]\* 9.4 Escribir property test para registro de webhook POST (P11)
+    - **Property 11: Registro completo de webhook POST**
+    - Para cualquier payload válido, el log debe contener message_id, direction='inbound', status='received', payload crudo, processing_ms >= 0
+    - **Validates: Requirements 7.1, 7.2, 7.7**
+  - [ ]\* 9.5 Escribir property test para idempotencia de webhook (P12)
+    - **Property 12: Idempotencia de webhook por message_id**
+    - Para cualquier message_id duplicado, no crear registro adicional y responder 200
+    - **Validates: Requirements 7.3**
+  - [ ]\* 9.6 Escribir property test para payloads inválidos (P13)
+    - **Property 13: Webhook POST maneja payloads inválidos**
+    - Para cualquier payload sin estructura WhatsApp válida, loguear con status='ignored' y responder 200
+    - **Validates: Requirements 7.5**
+
+- [x] 10. Checkpoint — Verificar webhook handler completo
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 11. Configurar proyecto React base con Vite + TypeScript + Tailwind
+  - [x] 11.1 Inicializar proyecto con Vite + React + TypeScript + Tailwind CSS
+    - Configurar vite.config.ts, tsconfig.json, tailwind.config.ts, postcss.config.js
+    - Instalar dependencias: react-router-dom, @supabase/supabase-js, zustand
+    - Configurar .env.example con VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY
+    - _Requirements: 8.1_
+  - [x] 11.2 Crear constantes y matriz de permisos en `src/lib/constants.ts`
+    - Definir ROLE_PERMISSIONS: mapeo de cada rol a las vistas permitidas (caja, cocina, mesas, inventario, turnos, config)
+    - Definir rutas del sistema con sus roles requeridos
+    - _Requirements: 8.5_
+
+- [x] 12. Implementar AuthGuard, Layout y Router
+  - [x] 12.1 Crear componente AuthGuard en `src/components/layout/AuthGuard.tsx`
+    - Si no hay sesión → redirect a /login
+    - Si hay sesión pero no hay restaurante activo → redirect a selector o pantalla de espera
+    - Si requiredRoles definido y rol actual no incluido → redirect a primera vista permitida para su rol
+    - Si todo OK → renderizar children
+    - _Requirements: 8.3, 8.4, 8.5, 8.6_
+  - [x] 12.2 Crear componentes de Layout en `src/components/layout/`
+    - AppLayout.tsx: wrapper con sidebar + header + contenido principal, responsivo (sidebar colapsable en mobile/tablet)
+    - Sidebar.tsx: navegación lateral filtrada por rol usando ROLE_PERMISSIONS del authStore
+    - Header.tsx: nombre del restaurante, usuario actual, botón de logout
+    - Optimizado para tablet como dispositivo principal
+    - _Requirements: 8.7, 8.8_
+  - [x] 12.3 Crear páginas placeholder y configurar Router en `src/App.tsx`
+    - Crear páginas placeholder: LoginPage, CajaPage, CocinaPage, MesasPage, InventarioPage, TurnosPage, ConfigPage
+    - Configurar React Router con rutas protegidas por AuthGuard y requiredRoles según matriz de permisos
+    - Ruta /login pública, todas las demás protegidas
+    - _Requirements: 8.2, 8.3_
+  - [x] 12.4 Crear LoginPage funcional en `src/pages/LoginPage.tsx`
+    - Formulario de email + password
+    - Llamar a authStore.signIn al enviar
+    - Mostrar errores genéricos (no revelar si email existe)
+    - Redirect a vista según rol tras login exitoso
+    - _Requirements: 3.1, 3.2, 3.7, 8.3_
+  - [x] 12.5 Conectar inicialización de auth en `src/main.tsx`
+    - Llamar a authStore.initialize() al montar la app
+    - Suscribirse a onAuthStateChange para manejar refresh de sesión
+    - _Requirements: 3.6, 8.10_
+  - [ ]\* 12.6 Escribir property test para AuthGuard (P14)
+    - **Property 14: Control de acceso del AuthGuard**
+    - Para cualquier combinación (estado_autenticación, rol, ruta), verificar redirect correcto
+    - **Validates: Requirements 8.3, 8.4, 8.5, 8.6**
+  - [ ]\* 12.7 Escribir property test para Sidebar por rol (P15)
+    - **Property 15: Sidebar filtra opciones por rol**
+    - Para cualquier rol, la sidebar debe renderizar exactamente las opciones permitidas según la matriz de permisos
+    - **Validates: Requirements 8.7**
+
+- [x] 13. Checkpoint final — Verificar integración completa
+  - Ensure all tests pass, ask the user if questions arise.
+
+## Notes
+
+- Las tareas marcadas con `*` son opcionales y pueden omitirse para un MVP más rápido
+- Cada tarea referencia los requerimientos específicos para trazabilidad
+- Los checkpoints aseguran validación incremental entre fases
+- Los property tests validan propiedades universales de corrección del diseño
+- Los unit tests validan ejemplos específicos y edge cases
+- El lenguaje de implementación es TypeScript tanto para frontend (React) como para backend (Edge Functions)
+- Las migraciones SQL siguen el formato `YYYYMMDDHHMMSS_descripcion.sql` de Supabase CLI
+- Todas las inserciones del seed usan `ON CONFLICT DO NOTHING` para idempotencia
